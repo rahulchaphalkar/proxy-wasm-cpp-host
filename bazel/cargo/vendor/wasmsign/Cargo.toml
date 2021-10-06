@@ -1,0 +1,19 @@
+[package]
+name = "wasmsign"
+version = "0.1.2"
+authors = ["Frank Denis <github@pureftpd.org>"]
+edition = "2018"
+description = "Add and verify digital signatures to/from WASM binaries"
+license-file = "LICENSE"
+homepage = "https://github.com/jedisct1/wasmsign"
+repository = "https://github.com/jedisct1/wasmsign.git"
+documentation = "https://github.com/jedisct1/wasmsign/blob/master/README.md"
+
+[dependencies]
+byteorder = "1"
+clap = "2"
+ed25519-compact = "0.1.9"
+anyhow = "1"
+thiserror = "1"
+hmac-sha512 = "0.1.8"
+parity-wasm = "0.42.2"
