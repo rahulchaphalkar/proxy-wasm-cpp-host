@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "include/proxy-wasm/word.h"
 
@@ -176,8 +177,8 @@ class WasmVm {
 public:
   virtual ~WasmVm() = default;
   /**
-   * Return the runtime identifier.
-   * @return one of WasmRuntimeValues from well_known_names.h (e.g. "v8").
+   * Identify the Wasm runtime.
+   * @return the name of the underlying Wasm runtime.
    */
   virtual std::string_view runtime() = 0;
 
@@ -297,12 +298,12 @@ public:
   void fail(FailState fail_state, std::string_view message) {
     integration()->error(message);
     failed_ = fail_state;
-    if (fail_callback_) {
-      fail_callback_(fail_state);
+    for (auto &callback : fail_callbacks_) {
+      callback(fail_state);
     }
   }
-  void setFailCallback(std::function<void(FailState)> fail_callback) {
-    fail_callback_ = fail_callback;
+  void addFailCallback(std::function<void(FailState)> fail_callback) {
+    fail_callbacks_.push_back(fail_callback);
   }
 
   // Integrator operations.
@@ -312,7 +313,7 @@ public:
 protected:
   std::unique_ptr<WasmVmIntegration> integration_;
   FailState failed_ = FailState::Ok;
-  std::function<void(FailState)> fail_callback_;
+  std::vector<std::function<void(FailState)>> fail_callbacks_;
 };
 
 // Thread local state set during a call into a WASM VM so that calls coming out of the

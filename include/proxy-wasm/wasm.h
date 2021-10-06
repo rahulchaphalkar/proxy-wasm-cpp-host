@@ -34,11 +34,8 @@ namespace proxy_wasm {
 #include "proxy_wasm_common.h"
 
 class ContextBase;
-class WasmBase;
 class WasmHandleBase;
 
-using WasmForeignFunction =
-    std::function<WasmResult(WasmBase &, std::string_view, std::function<void *(size_t size)>)>;
 using WasmVmFactory = std::function<std::unique_ptr<WasmVm>()>;
 using CallOnThreadFunction = std::function<void(std::function<void()>)>;
 
@@ -129,8 +126,6 @@ public:
   bool copyToPointerSize(std::string_view s, uint64_t ptr_ptr, uint64_t size_ptr);
   template <typename T> bool setDatatype(uint64_t ptr, const T &t);
 
-  WasmForeignFunction getForeignFunction(std::string_view function_name);
-
   void fail(FailState fail_state, std::string_view message) {
     error(message);
     failed_ = fail_state;
@@ -175,6 +170,35 @@ public:
   uint32_t nextCounterMetricId() { return next_counter_metric_id_ += kMetricIdIncrement; }
   uint32_t nextGaugeMetricId() { return next_gauge_metric_id_ += kMetricIdIncrement; }
   uint32_t nextHistogramMetricId() { return next_histogram_metric_id_ += kMetricIdIncrement; }
+
+  enum class CalloutType : uint32_t {
+    HttpCall = 0,
+    GrpcCall = 1,
+    GrpcStream = 2,
+  };
+  static const uint32_t kCalloutTypeMask = 0x3;  // Enough to cover the 3 types.
+  static const uint32_t kCalloutIncrement = 0x4; // Enough to cover the 3 types.
+  bool isHttpCallId(uint32_t callout_id) {
+    return (callout_id & kCalloutTypeMask) == static_cast<uint32_t>(CalloutType::HttpCall);
+  }
+  bool isGrpcCallId(uint32_t callout_id) {
+    return (callout_id & kCalloutTypeMask) == static_cast<uint32_t>(CalloutType::GrpcCall);
+  }
+  bool isGrpcStreamId(uint32_t callout_id) {
+    return (callout_id & kCalloutTypeMask) == static_cast<uint32_t>(CalloutType::GrpcStream);
+  }
+  uint32_t nextHttpCallId() {
+    // TODO(PiotrSikora): re-add rollover protection (requires at least 1 billion callouts).
+    return next_http_call_id_ += kCalloutIncrement;
+  }
+  uint32_t nextGrpcCallId() {
+    // TODO(PiotrSikora): re-add rollover protection (requires at least 1 billion callouts).
+    return next_grpc_call_id_ += kCalloutIncrement;
+  }
+  uint32_t nextGrpcStreamId() {
+    // TODO(PiotrSikora): re-add rollover protection (requires at least 1 billion callouts).
+    return next_grpc_stream_id_ += kCalloutIncrement;
+  }
 
 protected:
   friend class ContextBase;
@@ -278,6 +302,11 @@ protected:
   uint32_t next_counter_metric_id_ = static_cast<uint32_t>(MetricType::Counter);
   uint32_t next_gauge_metric_id_ = static_cast<uint32_t>(MetricType::Gauge);
   uint32_t next_histogram_metric_id_ = static_cast<uint32_t>(MetricType::Histogram);
+
+  // HTTP/gRPC callouts.
+  uint32_t next_http_call_id_ = static_cast<uint32_t>(CalloutType::HttpCall);
+  uint32_t next_grpc_call_id_ = static_cast<uint32_t>(CalloutType::GrpcCall);
+  uint32_t next_grpc_stream_id_ = static_cast<uint32_t>(CalloutType::GrpcStream);
 
   // Actions to be done after the call into the VM returns.
   std::deque<std::function<void()>> after_vm_call_actions_;
@@ -404,9 +433,5 @@ inline bool WasmBase::copyToPointerSize(std::string_view s, uint64_t ptr_ptr, ui
 template <typename T> inline bool WasmBase::setDatatype(uint64_t ptr, const T &t) {
   return wasm_vm_->setMemory(ptr, sizeof(T), &t);
 }
-
-struct RegisterForeignFunction {
-  RegisterForeignFunction(std::string name, WasmForeignFunction f);
-};
 
 } // namespace proxy_wasm

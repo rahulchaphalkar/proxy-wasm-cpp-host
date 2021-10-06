@@ -45,7 +45,6 @@ thread_local std::unordered_map<std::string, std::weak_ptr<PluginHandleBase>> lo
 // Map from Wasm Key to the base Wasm instance, using a pointer to avoid the initialization fiasco.
 std::mutex base_wasms_mutex;
 std::unordered_map<std::string, std::weak_ptr<WasmHandleBase>> *base_wasms = nullptr;
-std::unordered_map<std::string, WasmForeignFunction> *foreign_functions = nullptr;
 
 std::vector<uint8_t> Sha256(const std::vector<std::string_view> parts) {
   uint8_t sha256[SHA256_DIGEST_LENGTH];
@@ -84,13 +83,6 @@ public:
 private:
   std::shared_ptr<WasmBase> wasm_;
 };
-
-RegisterForeignFunction::RegisterForeignFunction(std::string name, WasmForeignFunction f) {
-  if (!foreign_functions) {
-    foreign_functions = new std::remove_reference<decltype(*foreign_functions)>::type;
-  }
-  (*foreign_functions)[name] = f;
-}
 
 void WasmBase::registerCallbacks() {
 #define _REGISTER(_fn)                                                                             \
@@ -208,7 +200,7 @@ WasmBase::WasmBase(const std::shared_ptr<WasmHandleBase> &base_wasm_handle, Wasm
   if (!wasm_vm_) {
     failed_ = FailState::UnableToCreateVm;
   } else {
-    wasm_vm_->setFailCallback([this](FailState fail_state) { failed_ = fail_state; });
+    wasm_vm_->addFailCallback([this](FailState fail_state) { failed_ = fail_state; });
   }
 }
 
@@ -222,7 +214,7 @@ WasmBase::WasmBase(std::unique_ptr<WasmVm> wasm_vm, std::string_view vm_id,
   if (!wasm_vm_) {
     failed_ = FailState::UnableToCreateVm;
   } else {
-    wasm_vm_->setFailCallback([this](FailState fail_state) { failed_ = fail_state; });
+    wasm_vm_->addFailCallback([this](FailState fail_state) { failed_ = fail_state; });
   }
 }
 
@@ -454,14 +446,6 @@ void WasmBase::finishShutdown() {
   }
 }
 
-WasmForeignFunction WasmBase::getForeignFunction(std::string_view function_name) {
-  auto it = foreign_functions->find(std::string(function_name));
-  if (it != foreign_functions->end()) {
-    return it->second;
-  }
-  return nullptr;
-}
-
 std::shared_ptr<WasmHandleBase> createWasm(std::string vm_key, std::string code,
                                            std::shared_ptr<PluginBase> plugin,
                                            WasmHandleFactory factory,
@@ -559,6 +543,14 @@ getOrCreateThreadLocalWasm(std::shared_ptr<WasmHandleBase> base_handle,
     return nullptr;
   }
   local_wasms[vm_key] = wasm_handle;
+  wasm_handle->wasm()->wasm_vm()->addFailCallback([vm_key](proxy_wasm::FailState fail_state) {
+    if (fail_state == proxy_wasm::FailState::RuntimeError) {
+      // If VM failed, erase the entry so that:
+      // 1) we can recreate the new thread local VM from the same base_wasm.
+      // 2) we wouldn't reuse the failed VM for new plugins accidentally.
+      local_wasms.erase(vm_key);
+    };
+  });
   return wasm_handle;
 }
 
@@ -594,6 +586,14 @@ std::shared_ptr<PluginHandleBase> getOrCreateThreadLocalPlugin(
   }
   auto plugin_handle = plugin_factory(wasm_handle, plugin);
   local_plugins[key] = plugin_handle;
+  wasm_handle->wasm()->wasm_vm()->addFailCallback([key](proxy_wasm::FailState fail_state) {
+    if (fail_state == proxy_wasm::FailState::RuntimeError) {
+      // If VM failed, erase the entry so that:
+      // 1) we can recreate the new thread local plugin from the same base_wasm.
+      // 2) we wouldn't reuse the failed VM for new plugin configs accidentally.
+      local_plugins.erase(key);
+    };
+  });
   return plugin_handle;
 }
 
