@@ -16,27 +16,32 @@
 
 namespace proxy_wasm {
 
-std::vector<std::string> getRuntimes() {
-  std::vector<std::string> runtimes = {
-#if defined(PROXY_WASM_HAS_RUNTIME_V8)
+std::string TestContext::global_log_;
+
+std::vector<std::string> getWasmEngines() {
+  std::vector<std::string> engines = {
+#if defined(PROXY_WASM_HOST_ENGINE_V8)
     "v8",
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WAVM)
-    "wavm",
+#if defined(PROXY_WASM_HOST_ENGINE_WAMR)
+    "wamr",
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WASMTIME)
+#if defined(PROXY_WASM_HOST_ENGINE_WASMEDGE)
+    "wasmedge",
+#endif
+#if defined(PROXY_WASM_HOST_ENGINE_WASMTIME)
     "wasmtime",
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WAMR)
-    "wamr",
+#if defined(PROXY_WASM_HOST_ENGINE_WAVM)
+    "wavm",
 #endif
     ""
   };
-  runtimes.pop_back();
-  return runtimes;
+  engines.pop_back();
+  return engines;
 }
 
-std::string readTestWasmFile(std::string filename) {
+std::string readTestWasmFile(const std::string &filename) {
   auto path = "test/test_data/" + filename;
   std::ifstream file(path, std::ios::binary);
   EXPECT_FALSE(file.fail()) << "failed to open: " << path;

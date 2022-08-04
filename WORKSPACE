@@ -8,6 +8,14 @@ load("@proxy_wasm_cpp_host//bazel:dependencies.bzl", "proxy_wasm_cpp_host_depend
 
 proxy_wasm_cpp_host_dependencies()
 
-load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
+load("@proxy_wasm_cpp_sdk//bazel:repositories.bzl", "proxy_wasm_cpp_sdk_repositories")
 
-rules_foreign_cc_dependencies()
+proxy_wasm_cpp_sdk_repositories()
+
+load("@proxy_wasm_cpp_sdk//bazel:dependencies.bzl", "proxy_wasm_cpp_sdk_dependencies")
+
+proxy_wasm_cpp_sdk_dependencies()
+
+load("@proxy_wasm_cpp_sdk//bazel:dependencies_extra.bzl", "proxy_wasm_cpp_sdk_dependencies_extra")
+
+proxy_wasm_cpp_sdk_dependencies_extra()

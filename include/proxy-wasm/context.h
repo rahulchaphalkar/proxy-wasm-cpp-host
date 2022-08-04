@@ -49,10 +49,10 @@ class WasmVm;
  */
 struct PluginBase {
   PluginBase(std::string_view name, std::string_view root_id, std::string_view vm_id,
-             std::string_view runtime, std::string_view plugin_configuration, bool fail_open,
+             std::string_view engine, std::string_view plugin_configuration, bool fail_open,
              std::string_view key)
       : name_(std::string(name)), root_id_(std::string(root_id)), vm_id_(std::string(vm_id)),
-        runtime_(std::string(runtime)), plugin_configuration_(plugin_configuration),
+        engine_(std::string(engine)), plugin_configuration_(plugin_configuration),
         fail_open_(fail_open),
         key_(root_id_ + "||" + plugin_configuration_ + "||" + std::string(key)),
         log_prefix_(makeLogPrefix()) {}
@@ -60,7 +60,7 @@ struct PluginBase {
   const std::string name_;
   const std::string root_id_;
   const std::string vm_id_;
-  const std::string runtime_;
+  const std::string engine_;
   const std::string plugin_configuration_;
   const bool fail_open_;
 
@@ -143,11 +143,11 @@ class ContextBase : public RootInterface,
                     public SharedQueueInterface,
                     public GeneralInterface {
 public:
-  ContextBase();                                                   // Testing.
-  ContextBase(WasmBase *wasm);                                     // Vm Context.
-  ContextBase(WasmBase *wasm, std::shared_ptr<PluginBase> plugin); // Root Context.
+  ContextBase();                                                          // Testing.
+  ContextBase(WasmBase *wasm);                                            // Vm Context.
+  ContextBase(WasmBase *wasm, const std::shared_ptr<PluginBase> &plugin); // Root Context.
   ContextBase(WasmBase *wasm, uint32_t parent_context_id,
-              std::shared_ptr<PluginHandleBase> plugin_handle); // Stream context.
+              const std::shared_ptr<PluginHandleBase> &plugin_handle); // Stream context.
   virtual ~ContextBase();
 
   WasmBase *wasm() const { return wasm_; }
@@ -196,11 +196,11 @@ public:
 
   // HTTP
   FilterHeadersStatus onRequestHeaders(uint32_t headers, bool end_of_stream) override;
-  FilterDataStatus onRequestBody(uint32_t body_buffer_length, bool end_of_stream) override;
+  FilterDataStatus onRequestBody(uint32_t body_length, bool end_of_stream) override;
   FilterTrailersStatus onRequestTrailers(uint32_t trailers) override;
   FilterMetadataStatus onRequestMetadata(uint32_t elements) override;
   FilterHeadersStatus onResponseHeaders(uint32_t headers, bool end_of_stream) override;
-  FilterDataStatus onResponseBody(uint32_t body_buffer_length, bool end_of_stream) override;
+  FilterDataStatus onResponseBody(uint32_t body_length, bool end_of_stream) override;
   FilterTrailersStatus onResponseTrailers(uint32_t trailers) override;
   FilterMetadataStatus onResponseMetadata(uint32_t elements) override;
 
@@ -237,32 +237,17 @@ public:
   WasmResult log(uint32_t /* level */, std::string_view /* message */) override {
     return unimplemented();
   }
-  uint32_t getLogLevel() override { return static_cast<uint32_t>(LogLevel::info); }
-  uint64_t getCurrentTimeNanoseconds() override {
-#if !defined(_MSC_VER)
-    struct timespec tpe;
-    clock_gettime(CLOCK_REALTIME, &tpe);
-    uint64_t t = tpe.tv_sec;
-    t *= 1000000000;
-    t += tpe.tv_nsec;
-    return t;
-#else
+  uint32_t getLogLevel() override {
     unimplemented();
     return 0;
-#endif
+  }
+  uint64_t getCurrentTimeNanoseconds() override {
+    unimplemented();
+    return 0;
   }
   uint64_t getMonotonicTimeNanoseconds() override {
-#if !defined(_MSC_VER)
-    struct timespec tpe;
-    clock_gettime(CLOCK_MONOTONIC, &tpe);
-    uint64_t t = tpe.tv_sec;
-    t *= 1000000000;
-    t += tpe.tv_nsec;
-    return t;
-#else
     unimplemented();
     return 0;
-#endif
   }
   std::string_view getConfiguration() override {
     unimplemented();
@@ -353,12 +338,15 @@ public:
   WasmResult getSharedData(std::string_view key,
                            std::pair<std::string, uint32_t /* cas */> *data) override;
   WasmResult setSharedData(std::string_view key, std::string_view value, uint32_t cas) override;
+  WasmResult getSharedDataKeys(std::vector<std::string> *result) override;
+  WasmResult removeSharedDataKey(std::string_view key, uint32_t cas,
+                                 std::pair<std::string, uint32_t> *result) override;
 
   // Shared Queue
   WasmResult registerSharedQueue(std::string_view queue_name,
                                  SharedQueueDequeueToken *token_ptr) override;
   WasmResult lookupSharedQueue(std::string_view vm_id, std::string_view queue_name,
-                               SharedQueueEnqueueToken *token) override;
+                               SharedQueueEnqueueToken *token_ptr) override;
   WasmResult dequeueSharedQueue(uint32_t token, std::string *data) override;
   WasmResult enqueueSharedQueue(uint32_t token, std::string_view value) override;
 

@@ -110,6 +110,8 @@ using WasmCallback_WWl = Word (*)(Word, int64_t);
 using WasmCallback_WWlWW = Word (*)(Word, int64_t, Word, Word);
 using WasmCallback_WWm = Word (*)(Word, uint64_t);
 using WasmCallback_WWmW = Word (*)(Word, uint64_t, Word);
+using WasmCallback_WWWWWWllWW = Word (*)(Word, Word, Word, Word, Word, int64_t, int64_t, Word,
+                                         Word);
 using WasmCallback_dd = double (*)(double);
 
 #define FOR_ALL_WASM_VM_IMPORTS(_f)                                                                \
@@ -127,7 +129,8 @@ using WasmCallback_dd = double (*)(double);
                                               _f(proxy_wasm::WasmCallback_WWlWW)                   \
                                                   _f(proxy_wasm::WasmCallback_WWm)                 \
                                                       _f(proxy_wasm::WasmCallback_WWmW)            \
-                                                          _f(proxy_wasm::WasmCallback_dd)
+                                                          _f(proxy_wasm::WasmCallback_WWWWWWllWW)  \
+                                                              _f(proxy_wasm::WasmCallback_dd)
 
 enum class Cloneable {
   NotCloneable,      // VMs can not be cloned and should be created from scratch.
@@ -177,10 +180,10 @@ class WasmVm {
 public:
   virtual ~WasmVm() = default;
   /**
-   * Identify the Wasm runtime.
-   * @return the name of the underlying Wasm runtime.
+   * Identify the Wasm engine.
+   * @return the name of the underlying Wasm engine.
    */
-  virtual std::string_view runtime() = 0;
+  virtual std::string_view getEngineName() = 0;
 
   /**
    * Whether or not the VM implementation supports cloning. Cloning is VM system dependent.
@@ -211,7 +214,7 @@ public:
    * @return whether or not the load was successful.
    */
   virtual bool load(std::string_view bytecode, std::string_view precompiled,
-                    const std::unordered_map<uint32_t, std::string> function_names) = 0;
+                    const std::unordered_map<uint32_t, std::string> &function_names) = 0;
 
   /**
    * Link the WASM code to the host-provided functions, e.g. the ABI. Prior to linking, the module
@@ -293,6 +296,11 @@ public:
                                 typename ConvertFunctionTypeWordToUint32<_T>::type) = 0;
   FOR_ALL_WASM_VM_IMPORTS(_REGISTER_CALLBACK)
 #undef _REGISTER_CALLBACK
+
+  /**
+   * Terminate execution of this WasmVM. It shouldn't be used after being terminated.
+   */
+  virtual void terminate() = 0;
 
   bool isFailed() { return failed_ != FailState::Ok; }
   void fail(FailState fail_state, std::string_view message) {

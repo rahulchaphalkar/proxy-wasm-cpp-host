@@ -14,9 +14,10 @@
 
 #include "include/proxy-wasm/wasm_vm.h"
 
-#include "gtest/gtest.h"
 #include "include/proxy-wasm/null.h"
 #include "include/proxy-wasm/null_vm_plugin.h"
+
+#include "gtest/gtest.h"
 
 namespace proxy_wasm {
 
@@ -58,13 +59,13 @@ TEST(WasmVm, Word) {
 
 class BaseVmTest : public testing::Test {
 public:
-  BaseVmTest() {}
+  BaseVmTest() = default;
 };
 
 TEST_F(BaseVmTest, NullVmStartup) {
   auto wasm_vm = createNullVm();
   EXPECT_TRUE(wasm_vm != nullptr);
-  EXPECT_TRUE(wasm_vm->runtime() == "null");
+  EXPECT_TRUE(wasm_vm->getEngineName() == "null");
   EXPECT_TRUE(wasm_vm->cloneable() == Cloneable::InstantiatedModule);
   auto wasm_vm_clone = wasm_vm->clone();
   EXPECT_TRUE(wasm_vm_clone != nullptr);

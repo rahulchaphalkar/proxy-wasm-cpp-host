@@ -21,23 +21,35 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "v8.h"
-#include "v8-version.h"
+#include "include/proxy-wasm/limits.h"
+
+#include "include/v8-version.h"
+#include "include/v8.h"
+#include "src/wasm/c-api.h"
 #include "wasm-api/wasm.hh"
 
+namespace v8::internal {
+extern bool FLAG_liftoff;
+extern unsigned int FLAG_wasm_max_mem_pages;
+} // namespace v8::internal
+
 namespace proxy_wasm {
-namespace {
+namespace v8 {
 
 wasm::Engine *engine() {
   static std::once_flag init;
   static wasm::own<wasm::Engine> engine;
 
   std::call_once(init, []() {
-    v8::V8::EnableWebAssemblyTrapHandler(true);
+    ::v8::internal::FLAG_liftoff = false;
+    ::v8::internal::FLAG_wasm_max_mem_pages =
+        PROXY_WASM_HOST_MAX_WASM_MEMORY_SIZE_BYTES / PROXY_WASM_HOST_WASM_MEMORY_PAGE_SIZE_BYTES;
+    ::v8::V8::EnableWebAssemblyTrapHandler(true);
     engine = wasm::Engine::make();
   });
 
@@ -49,21 +61,21 @@ struct FuncData {
 
   std::string name_;
   wasm::own<wasm::Func> callback_;
-  void *raw_func_;
-  WasmVm *vm_;
+  void *raw_func_{};
+  WasmVm *vm_{};
 };
 
 using FuncDataPtr = std::unique_ptr<FuncData>;
 
 class V8 : public WasmVm {
 public:
-  V8() {}
+  V8() = default;
 
   // WasmVm
-  std::string_view runtime() override { return "v8"; }
+  std::string_view getEngineName() override { return "v8"; }
 
   bool load(std::string_view bytecode, std::string_view precompiled,
-            const std::unordered_map<uint32_t, std::string> function_names) override;
+            const std::unordered_map<uint32_t, std::string> &function_names) override;
   std::string_view getPrecompiledSectionName() override;
   bool link(std::string_view debug_name) override;
 
@@ -91,6 +103,8 @@ public:
   };
   FOR_ALL_WASM_VM_EXPORTS(_GET_MODULE_FUNCTION)
 #undef _GET_MODULE_FUNCTION
+
+  void terminate() override;
 
 private:
   std::string getFailMessage(std::string_view function_name, wasm::own<wasm::Trap> trap);
@@ -147,7 +161,7 @@ static std::string printValues(const wasm::Val values[], size_t size) {
 
   std::string s;
   for (size_t i = 0; i < size; i++) {
-    if (i) {
+    if (i != 0U) {
       s.append(", ");
     }
     s.append(printValue(values[i]));
@@ -182,7 +196,7 @@ static std::string printValTypes(const wasm::ownvec<wasm::ValType> &types) {
   std::string s;
   s.reserve(types.size() * 8 /* max size + " " */ - 1);
   for (size_t i = 0; i < types.size(); i++) {
-    if (i) {
+    if (i != 0U) {
       s.append(" ");
     }
     s.append(printValKind(types[i]->kind()));
@@ -223,7 +237,7 @@ template <> constexpr auto convertArgToValKind<uint64_t>() { return wasm::I64; }
 template <> constexpr auto convertArgToValKind<double>() { return wasm::F64; };
 
 template <typename T, std::size_t... I>
-constexpr auto convertArgsTupleToValTypesImpl(std::index_sequence<I...>) {
+constexpr auto convertArgsTupleToValTypesImpl(std::index_sequence<I...> /*comptime*/) {
   return wasm::ownvec<wasm::ValType>::make(
       wasm::ValType::make(convertArgToValKind<typename std::tuple_element<I, T>::type>())...);
 }
@@ -233,7 +247,7 @@ template <typename T> constexpr auto convertArgsTupleToValTypes() {
 }
 
 template <typename T, typename U, std::size_t... I>
-constexpr T convertValTypesToArgsTupleImpl(const U &arr, std::index_sequence<I...>) {
+constexpr T convertValTypesToArgsTupleImpl(const U &arr, std::index_sequence<I...> /*comptime*/) {
   return std::make_tuple(
       (arr[I]
            .template get<
@@ -248,26 +262,33 @@ template <typename T, typename U> constexpr T convertValTypesToArgsTuple(const U
 // V8 implementation.
 
 bool V8::load(std::string_view bytecode, std::string_view precompiled,
-              const std::unordered_map<uint32_t, std::string> function_names) {
+              const std::unordered_map<uint32_t, std::string> &function_names) {
   store_ = wasm::Store::make(engine());
+  if (store_ == nullptr) {
+    return false;
+  }
 
   if (!precompiled.empty()) {
     auto vec = wasm::vec<byte_t>::make_uninitialized(precompiled.size());
     ::memcpy(vec.get(), precompiled.data(), precompiled.size());
     module_ = wasm::Module::deserialize(store_.get(), vec);
+    if (module_ == nullptr) {
+      return false;
+    }
 
   } else {
     auto vec = wasm::vec<byte_t>::make_uninitialized(bytecode.size());
     ::memcpy(vec.get(), bytecode.data(), bytecode.size());
     module_ = wasm::Module::make(store_.get(), vec);
-  }
-
-  if (!module_) {
-    return false;
+    if (module_ == nullptr) {
+      return false;
+    }
   }
 
   shared_module_ = module_->share();
-  assert(shared_module_ != nullptr);
+  if (shared_module_ == nullptr) {
+    return false;
+  }
 
   function_names_index_ = function_names;
 
@@ -278,10 +299,26 @@ std::unique_ptr<WasmVm> V8::clone() {
   assert(shared_module_ != nullptr);
 
   auto clone = std::make_unique<V8>();
-  clone->integration().reset(integration()->clone());
+  if (clone == nullptr) {
+    return nullptr;
+  }
+
   clone->store_ = wasm::Store::make(engine());
+  if (clone->store_ == nullptr) {
+    return nullptr;
+  }
 
   clone->module_ = wasm::Module::obtain(clone->store_.get(), shared_module_.get());
+  if (clone->module_ == nullptr) {
+    return nullptr;
+  }
+
+  auto *integration_clone = integration()->clone();
+  if (integration_clone == nullptr) {
+    return nullptr;
+  }
+  clone->integration().reset(integration_clone);
+
   clone->function_names_index_ = function_names_index_;
 
   return clone;
@@ -303,7 +340,7 @@ std::string_view V8::getPrecompiledSectionName() {
   return name;
 }
 
-bool V8::link(std::string_view debug_name) {
+bool V8::link(std::string_view /*debug_name*/) {
   assert(module_ != nullptr);
 
   const auto import_types = module_.get()->imports();
@@ -312,7 +349,7 @@ bool V8::link(std::string_view debug_name) {
   for (size_t i = 0; i < import_types.size(); i++) {
     std::string_view module(import_types[i]->module().get(), import_types[i]->module().size());
     std::string_view name(import_types[i]->name().get(), import_types[i]->name().size());
-    auto import_type = import_types[i]->type();
+    const auto *import_type = import_types[i]->type();
 
     switch (import_type->kind()) {
 
@@ -322,9 +359,9 @@ bool V8::link(std::string_view debug_name) {
         fail(FailState::UnableToInitializeCode,
              std::string("Failed to load Wasm module due to a missing import: ") +
                  std::string(module) + "." + std::string(name));
-        break;
+        return false;
       }
-      auto func = it->second.get()->callback_.get();
+      auto *func = it->second->callback_.get();
       if (!equalValTypes(import_type->func()->params(), func->type()->params()) ||
           !equalValTypes(import_type->func()->results(), func->type()->results())) {
         fail(FailState::UnableToInitializeCode,
@@ -334,7 +371,7 @@ bool V8::link(std::string_view debug_name) {
                  printValTypes(import_type->func()->results()) +
                  ", but host exports: " + printValTypes(func->type()->params()) + " -> " +
                  printValTypes(func->type()->results()));
-        break;
+        return false;
       }
       imports.push_back(func);
     } break;
@@ -344,12 +381,19 @@ bool V8::link(std::string_view debug_name) {
       fail(FailState::UnableToInitializeCode,
            "Failed to load Wasm module due to a missing import: " + std::string(module) + "." +
                std::string(name));
+      return false;
     } break;
 
     case wasm::EXTERN_MEMORY: {
       assert(memory_ == nullptr);
       auto type = wasm::MemoryType::make(import_type->memory()->limits());
+      if (type == nullptr) {
+        return false;
+      }
       memory_ = wasm::Memory::make(store_.get(), type.get());
+      if (memory_ == nullptr) {
+        return false;
+      }
       imports.push_back(memory_.get());
     } break;
 
@@ -358,7 +402,13 @@ bool V8::link(std::string_view debug_name) {
       auto type =
           wasm::TableType::make(wasm::ValType::make(import_type->table()->element()->kind()),
                                 import_type->table()->limits());
+      if (type == nullptr) {
+        return false;
+      }
       table_ = wasm::Table::make(store_.get(), type.get());
+      if (table_ == nullptr) {
+        return false;
+      }
       imports.push_back(table_.get());
     } break;
     }
@@ -369,6 +419,10 @@ bool V8::link(std::string_view debug_name) {
   }
 
   instance_ = wasm::Instance::make(store_.get(), module_.get(), imports.data());
+  if (instance_ == nullptr) {
+    fail(FailState::UnableToInitializeCode, "Failed to create new Wasm instance");
+    return false;
+  }
 
   const auto export_types = module_.get()->exports();
   const auto exports = instance_.get()->exports();
@@ -376,8 +430,8 @@ bool V8::link(std::string_view debug_name) {
 
   for (size_t i = 0; i < export_types.size(); i++) {
     std::string_view name(export_types[i]->name().get(), export_types[i]->name().size());
-    auto export_type = export_types[i]->type();
-    auto export_item = exports[i].get();
+    const auto *export_type = export_types[i]->type();
+    auto *export_item = exports[i].get();
     assert(export_type->kind() == export_item->kind());
 
     switch (export_type->kind()) {
@@ -395,6 +449,9 @@ bool V8::link(std::string_view debug_name) {
       assert(export_item->memory() != nullptr);
       assert(memory_ == nullptr);
       memory_ = exports[i]->memory()->copy();
+      if (memory_ == nullptr) {
+        return false;
+      }
     } break;
 
     case wasm::EXTERN_TABLE: {
@@ -403,7 +460,7 @@ bool V8::link(std::string_view debug_name) {
     }
   }
 
-  return !isFailed();
+  return true;
 }
 
 uint64_t V8::getMemorySize() { return memory_->data_size(); }
@@ -432,7 +489,7 @@ bool V8::getWord(uint64_t pointer, Word *word) {
   }
   uint32_t word32;
   ::memcpy(&word32, memory_->data() + pointer, size);
-  word->u64_ = word32;
+  word->u64_ = wasmtoh(word32);
   return true;
 }
 
@@ -441,7 +498,7 @@ bool V8::setWord(uint64_t pointer, Word word) {
   if (pointer + size > memory_->data_size()) {
     return false;
   }
-  uint32_t word32 = word.u32();
+  uint32_t word32 = htowasm(word.u32());
   ::memcpy(memory_->data() + pointer, &word32, size);
   return true;
 }
@@ -455,8 +512,8 @@ void V8::registerHostFunctionImpl(std::string_view module_name, std::string_view
                                    convertArgsTupleToValTypes<std::tuple<>>());
   auto func = wasm::Func::make(
       store_.get(), type.get(),
-      [](void *data, const wasm::Val params[], wasm::Val[]) -> wasm::own<wasm::Trap> {
-        auto func_data = reinterpret_cast<FuncData *>(data);
+      [](void *data, const wasm::Val params[], wasm::Val /*results*/[]) -> wasm::own<wasm::Trap> {
+        auto *func_data = reinterpret_cast<FuncData *>(data);
         const bool log = func_data->vm_->cmpLogLevel(LogLevel::trace);
         if (log) {
           func_data->vm_->integration()->trace("[vm->host] " + func_data->name_ + "(" +
@@ -489,7 +546,7 @@ void V8::registerHostFunctionImpl(std::string_view module_name, std::string_view
   auto func = wasm::Func::make(
       store_.get(), type.get(),
       [](void *data, const wasm::Val params[], wasm::Val results[]) -> wasm::own<wasm::Trap> {
-        auto func_data = reinterpret_cast<FuncData *>(data);
+        auto *func_data = reinterpret_cast<FuncData *>(data);
         const bool log = func_data->vm_->cmpLogLevel(LogLevel::trace);
         if (log) {
           func_data->vm_->integration()->trace("[vm->host] " + func_data->name_ + "(" +
@@ -539,6 +596,8 @@ void V8::getModuleFunctionImpl(std::string_view function_name,
     const bool log = cmpLogLevel(LogLevel::trace);
     SaveRestoreContext saved_context(context);
     wasm::own<wasm::Trap> trap = nullptr;
+
+    // Workaround for MSVC++ not supporting zero-sized arrays.
     if constexpr (sizeof...(args) > 0) {
       wasm::Val params[] = {makeVal(args)...};
       if (log) {
@@ -552,6 +611,7 @@ void V8::getModuleFunctionImpl(std::string_view function_name,
       }
       trap = func->call(nullptr, nullptr);
     }
+
     if (trap) {
       fail(FailState::RuntimeError, getFailMessage(std::string(function_name), std::move(trap)));
       return;
@@ -588,6 +648,8 @@ void V8::getModuleFunctionImpl(std::string_view function_name,
     SaveRestoreContext saved_context(context);
     wasm::Val results[1];
     wasm::own<wasm::Trap> trap = nullptr;
+
+    // Workaround for MSVC++ not supporting zero-sized arrays.
     if constexpr (sizeof...(args) > 0) {
       wasm::Val params[] = {makeVal(args)...};
       if (log) {
@@ -601,6 +663,7 @@ void V8::getModuleFunctionImpl(std::string_view function_name,
       }
       trap = func->call(nullptr, results);
     }
+
     if (trap) {
       fail(FailState::RuntimeError, getFailMessage(std::string(function_name), std::move(trap)));
       return R{};
@@ -614,6 +677,15 @@ void V8::getModuleFunctionImpl(std::string_view function_name,
   };
 }
 
+void V8::terminate() {
+  auto *store_impl = reinterpret_cast<wasm::StoreImpl *>(store_.get());
+  auto *isolate = store_impl->isolate();
+  isolate->TerminateExecution();
+  while (isolate->IsExecutionTerminating()) {
+    std::this_thread::yield();
+  }
+}
+
 std::string V8::getFailMessage(std::string_view function_name, wasm::own<wasm::Trap> trap) {
   auto message = "Function: " + std::string(function_name) + " failed: ";
   message += std::string(trap->message().get(), trap->message().size());
@@ -625,7 +697,7 @@ std::string V8::getFailMessage(std::string_view function_name, wasm::own<wasm::T
   auto trace = trap->trace();
   message += "\nProxy-Wasm plugin in-VM backtrace:";
   for (size_t i = 0; i < trace.size(); ++i) {
-    auto frame = trace[i].get();
+    auto *frame = trace[i].get();
     std::ostringstream oss;
     oss << std::setw(3) << std::setfill(' ') << std::to_string(i);
     message += "\n" + oss.str() + ": ";
@@ -645,8 +717,8 @@ std::string V8::getFailMessage(std::string_view function_name, wasm::own<wasm::T
   return message;
 }
 
-} // namespace
+} // namespace v8
 
-std::unique_ptr<WasmVm> createV8Vm() { return std::make_unique<V8>(); }
+std::unique_ptr<WasmVm> createV8Vm() { return std::make_unique<v8::V8>(); }
 
 } // namespace proxy_wasm

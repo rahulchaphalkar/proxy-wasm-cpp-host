@@ -14,6 +14,10 @@
 
 #include "include/proxy-wasm/bytecode_util.h"
 
+#if !defined(_MSC_VER)
+#include <cxxabi.h>
+#endif
+
 #include <cstring>
 
 namespace proxy_wasm {
@@ -21,7 +25,7 @@ namespace proxy_wasm {
 bool BytecodeUtil::checkWasmHeader(std::string_view bytecode) {
   // Wasm file header is 8 bytes (magic number + version).
   static const uint8_t wasm_magic_number[4] = {0x00, 0x61, 0x73, 0x6d};
-  return bytecode.size() < 8 || !::memcmp(bytecode.data(), wasm_magic_number, 4);
+  return (bytecode.size() < 8 || ::memcmp(bytecode.data(), wasm_magic_number, 4) == 0);
 }
 
 bool BytecodeUtil::getAbiVersion(std::string_view bytecode, proxy_wasm::AbiVersion &ret) {
@@ -55,7 +59,7 @@ bool BytecodeUtil::getAbiVersion(std::string_view bytecode, proxy_wasm::AbiVersi
         if (!parseVarint(pos, end, export_name_size) || pos + export_name_size > end) {
           return false;
         }
-        const auto name_begin = pos;
+        const auto *const name_begin = pos;
         pos += export_name_size;
         if (pos + 1 > end) {
           return false;
@@ -67,10 +71,12 @@ bool BytecodeUtil::getAbiVersion(std::string_view bytecode, proxy_wasm::AbiVersi
           if (export_name == "proxy_abi_version_0_1_0") {
             ret = AbiVersion::ProxyWasm_0_1_0;
             return true;
-          } else if (export_name == "proxy_abi_version_0_2_0") {
+          }
+          if (export_name == "proxy_abi_version_0_2_0") {
             ret = AbiVersion::ProxyWasm_0_2_0;
             return true;
-          } else if (export_name == "proxy_abi_version_0_2_1") {
+          }
+          if (export_name == "proxy_abi_version_0_2_1") {
             ret = AbiVersion::ProxyWasm_0_2_1;
             return true;
           }
@@ -81,9 +87,8 @@ bool BytecodeUtil::getAbiVersion(std::string_view bytecode, proxy_wasm::AbiVersi
         }
       }
       return true;
-    } else {
-      pos += section_len;
     }
+    pos += section_len;
   }
   return true;
 }
@@ -109,7 +114,7 @@ bool BytecodeUtil::getCustomSection(std::string_view bytecode, std::string_view 
     }
     if (section_type == 0) {
       // Custom section.
-      const auto section_data_start = pos;
+      const auto *const section_data_start = pos;
       uint32_t section_name_len = 0;
       if (!BytecodeUtil::parseVarint(pos, end, section_name_len) || pos + section_name_len > end) {
         return false;
@@ -149,7 +154,7 @@ bool BytecodeUtil::getFunctionNameIndex(std::string_view bytecode,
         pos += subsection_size;
       } else {
         // Enters function name subsection.
-        const auto start = pos;
+        const auto *const start = pos;
         uint32_t namemap_vector_size = 0;
         if (!parseVarint(pos, end, namemap_vector_size) || pos + namemap_vector_size > end) {
           return false;
@@ -164,7 +169,16 @@ bool BytecodeUtil::getFunctionNameIndex(std::string_view bytecode,
           if (!parseVarint(pos, end, func_name_size) || pos + func_name_size > end) {
             return false;
           }
-          ret.insert({func_index, std::string(pos, func_name_size)});
+          auto func_name = std::string(pos, func_name_size);
+#if !defined(_MSC_VER)
+          int status;
+          char *data = abi::__cxa_demangle(func_name.c_str(), nullptr, nullptr, &status);
+          if (data != nullptr) {
+            func_name = std::string(data);
+            ::free(data);
+          }
+#endif
+          ret.insert({func_index, func_name});
           pos += func_name_size;
         }
         if (start + subsection_size != pos) {
@@ -186,7 +200,7 @@ bool BytecodeUtil::getStrippedSource(std::string_view bytecode, std::string &ret
   const char *pos = bytecode.data() + 8;
   const char *end = bytecode.data() + bytecode.size();
   while (pos < end) {
-    const auto section_start = pos;
+    const auto *const section_start = pos;
     if (pos + 1 > end) {
       return false;
     }
@@ -196,7 +210,7 @@ bool BytecodeUtil::getStrippedSource(std::string_view bytecode, std::string &ret
       return false;
     }
     if (section_type == 0 /* custom section */) {
-      const auto section_data_start = pos;
+      const auto *const section_data_start = pos;
       uint32_t section_name_len = 0;
       if (!parseVarint(pos, end, section_name_len) || pos + section_name_len > end) {
         return false;
