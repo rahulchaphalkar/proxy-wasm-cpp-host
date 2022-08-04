@@ -40,8 +40,8 @@ struct HostFuncData {
 
   std::string name_;
   WasmFuncPtr callback_;
-  void *raw_func_;
-  WasmVm *vm_;
+  void *raw_func_{};
+  WasmVm *vm_{};
 };
 
 using HostFuncDataPtr = std::unique_ptr<HostFuncData>;
@@ -53,16 +53,16 @@ wasm_engine_t *engine() {
 
 class Wamr : public WasmVm {
 public:
-  Wamr() {}
+  Wamr() = default;
 
-  std::string_view runtime() override { return "wamr"; }
+  std::string_view getEngineName() override { return "wamr"; }
   std::string_view getPrecompiledSectionName() override { return ""; }
 
   Cloneable cloneable() override { return Cloneable::NotCloneable; }
   std::unique_ptr<WasmVm> clone() override { return nullptr; }
 
   bool load(std::string_view bytecode, std::string_view precompiled,
-            const std::unordered_map<uint32_t, std::string> function_names) override;
+            const std::unordered_map<uint32_t, std::string> &function_names) override;
   bool link(std::string_view debug_name) override;
   uint64_t getMemorySize() override;
   std::optional<std::string_view> getMemory(uint64_t pointer, uint64_t size) override;
@@ -85,6 +85,9 @@ public:
   };
   FOR_ALL_WASM_VM_EXPORTS(_GET_MODULE_FUNCTION)
 #undef _GET_MODULE_FUNCTION
+
+  void terminate() override {}
+
 private:
   template <typename... Args>
   void registerHostFunctionImpl(std::string_view module_name, std::string_view function_name,
@@ -113,15 +116,22 @@ private:
   std::unordered_map<std::string, WasmFuncPtr> module_functions_;
 };
 
-bool Wamr::load(std::string_view bytecode, std::string_view,
-                const std::unordered_map<uint32_t, std::string>) {
+bool Wamr::load(std::string_view bytecode, std::string_view /*precompiled*/,
+                const std::unordered_map<uint32_t, std::string> & /*function_names*/) {
   store_ = wasm_store_new(engine());
+  if (store_ == nullptr) {
+    return false;
+  }
 
   WasmByteVec vec;
   wasm_byte_vec_new(vec.get(), bytecode.size(), bytecode.data());
-  module_ = wasm_module_new(store_.get(), vec.get());
 
-  return module_ != nullptr;
+  module_ = wasm_module_new(store_.get(), vec.get());
+  if (module_ == nullptr) {
+    return false;
+  }
+
+  return true;
 }
 
 static bool equalValTypes(const wasm_valtype_vec_t *left, const wasm_valtype_vec_t *right) {
@@ -153,17 +163,17 @@ static std::string printValue(const wasm_val_t &value) {
   }
 }
 
-static std::string printValues(const wasm_val_t values[], size_t size) {
-  if (size == 0) {
+static std::string printValues(const wasm_val_vec_t *values) {
+  if (values->size == 0) {
     return "";
   }
 
   std::string s;
-  for (size_t i = 0; i < size; i++) {
-    if (i) {
+  for (size_t i = 0; i < values->size; i++) {
+    if (i != 0U) {
       s.append(", ");
     }
-    s.append(printValue(values[i]));
+    s.append(printValue(values->data[i]));
   }
   return s;
 }
@@ -195,7 +205,7 @@ static std::string printValTypes(const wasm_valtype_vec_t *types) {
   std::string s;
   s.reserve(types->size * 8 /* max size + " " */ - 1);
   for (size_t i = 0; i < types->size; i++) {
-    if (i) {
+    if (i != 0U) {
       s.append(" ");
     }
     s.append(printValKind(wasm_valtype_kind(types->data[i])));
@@ -203,13 +213,13 @@ static std::string printValTypes(const wasm_valtype_vec_t *types) {
   return s;
 }
 
-bool Wamr::link(std::string_view debug_name) {
+bool Wamr::link(std::string_view /*debug_name*/) {
   assert(module_ != nullptr);
 
   WasmImporttypeVec import_types;
   wasm_module_imports(module_.get(), import_types.get());
 
-  std::vector<const wasm_extern_t *> imports;
+  std::vector<wasm_extern_t *> imports;
   for (size_t i = 0; i < import_types.get()->size; i++) {
     const wasm_name_t *module_name_ptr = wasm_importtype_module(import_types.get()->data[i]);
     const wasm_name_t *name_ptr = wasm_importtype_name(import_types.get()->data[i]);
@@ -225,10 +235,10 @@ bool Wamr::link(std::string_view debug_name) {
         fail(FailState::UnableToInitializeCode,
              std::string("Failed to load Wasm module due to a missing import: ") +
                  std::string(module_name) + "." + std::string(name));
-        break;
+        return false;
       }
 
-      auto func = it->second->callback_.get();
+      auto *func = it->second->callback_.get();
       const wasm_functype_t *exp_type = wasm_externtype_as_functype_const(extern_type);
       WasmFunctypePtr actual_type = wasm_func_type(it->second->callback_.get());
       if (!equalValTypes(wasm_functype_params(exp_type), wasm_functype_params(actual_type.get())) ||
@@ -242,7 +252,7 @@ bool Wamr::link(std::string_view debug_name) {
                 printValTypes(wasm_functype_results(exp_type)) +
                 ", but host exports: " + printValTypes(wasm_functype_params(actual_type.get())) +
                 " -> " + printValTypes(wasm_functype_results(actual_type.get())));
-        break;
+        return false;
       }
       imports.push_back(wasm_func_as_extern(func));
     } break;
@@ -251,19 +261,32 @@ bool Wamr::link(std::string_view debug_name) {
       fail(FailState::UnableToInitializeCode,
            "Failed to load Wasm module due to a missing import: " + std::string(module_name) + "." +
                std::string(name));
+      return false;
     } break;
     case WASM_EXTERN_MEMORY: {
       assert(memory_ == nullptr);
       const wasm_memorytype_t *memory_type =
           wasm_externtype_as_memorytype_const(extern_type); // owned by `extern_type`
+      if (memory_type == nullptr) {
+        return false;
+      }
       memory_ = wasm_memory_new(store_.get(), memory_type);
+      if (memory_ == nullptr) {
+        return false;
+      }
       imports.push_back(wasm_memory_as_extern(memory_.get()));
     } break;
     case WASM_EXTERN_TABLE: {
       assert(table_ == nullptr);
       const wasm_tabletype_t *table_type =
           wasm_externtype_as_tabletype_const(extern_type); // owned by `extern_type`
+      if (table_type == nullptr) {
+        return false;
+      }
       table_ = wasm_table_new(store_.get(), table_type, nullptr);
+      if (table_ == nullptr) {
+        return false;
+      }
       imports.push_back(wasm_table_as_extern(table_.get()));
     } break;
     }
@@ -273,8 +296,12 @@ bool Wamr::link(std::string_view debug_name) {
     return false;
   }
 
-  instance_ = wasm_instance_new(store_.get(), module_.get(), imports.data(), nullptr);
-  assert(instance_ != nullptr);
+  wasm_extern_vec_t imports_vec = {imports.size(), imports.data(), imports.size()};
+  instance_ = wasm_instance_new(store_.get(), module_.get(), &imports_vec, nullptr);
+  if (instance_ == nullptr) {
+    fail(FailState::UnableToInitializeCode, "Failed to create new Wasm instance");
+    return false;
+  }
 
   WasmExportTypeVec export_types;
   wasm_module_exports(module_.get(), export_types.get());
@@ -301,7 +328,9 @@ bool Wamr::link(std::string_view debug_name) {
     case WASM_EXTERN_MEMORY: {
       assert(memory_ == nullptr);
       memory_ = wasm_memory_copy(wasm_extern_as_memory(actual_extern));
-      assert(memory_ != nullptr);
+      if (memory_ == nullptr) {
+        return false;
+      }
     } break;
     case WASM_EXTERN_TABLE: {
       // TODO(mathetake): add support when/if needed.
@@ -339,7 +368,7 @@ bool Wamr::getWord(uint64_t pointer, Word *word) {
 
   uint32_t word32;
   ::memcpy(&word32, wasm_memory_data(memory_.get()) + pointer, size);
-  word->u64_ = word32;
+  word->u64_ = wasmtoh(word32);
   return true;
 }
 
@@ -348,7 +377,7 @@ bool Wamr::setWord(uint64_t pointer, Word word) {
   if (pointer + size > wasm_memory_data_size(memory_.get())) {
     return false;
   }
-  uint32_t word32 = word.u32();
+  uint32_t word32 = htowasm(word.u32());
   ::memcpy(wasm_memory_data(memory_.get()) + pointer, &word32, size);
   return true;
 }
@@ -403,18 +432,15 @@ template <> uint64_t convertValueTypeToArg<uint64_t>(wasm_val_t val) {
 template <> double convertValueTypeToArg<double>(wasm_val_t val) { return val.of.f64; }
 
 template <typename T, typename U, std::size_t... I>
-constexpr T convertValTypesToArgsTupleImpl(const U &arr, std::index_sequence<I...>) {
+constexpr T convertValTypesToArgsTuple(const U &vec, std::index_sequence<I...> /*comptime*/) {
   return std::make_tuple(
-      convertValueTypeToArg<typename ConvertWordType<std::tuple_element_t<I, T>>::type>(arr[I])...);
-}
-
-template <typename T, typename U, typename Is = std::make_index_sequence<std::tuple_size<T>::value>>
-constexpr T convertValTypesToArgsTuple(const U &arr) {
-  return convertValTypesToArgsTupleImpl<T>(arr, Is());
+      convertValueTypeToArg<typename ConvertWordType<std::tuple_element_t<I, T>>::type>(
+          vec->data[I])...);
 }
 
 template <typename T, std::size_t... I>
-void convertArgsTupleToValTypesImpl(wasm_valtype_vec_t *types, std::index_sequence<I...>) {
+void convertArgsTupleToValTypesImpl(wasm_valtype_vec_t *types,
+                                    std::index_sequence<I...> /*comptime*/) {
   auto size = std::tuple_size<T>::value;
   auto ps = std::array<wasm_valtype_t *, std::tuple_size<T>::value>{
       convertArgToValTypePtr<typename std::tuple_element<I, T>::type>()...};
@@ -427,14 +453,16 @@ void convertArgsTupleToValTypes(wasm_valtype_vec_t *types) {
 }
 
 template <typename R, typename T> WasmFunctypePtr newWasmNewFuncType() {
-  wasm_valtype_vec_t params, results;
+  wasm_valtype_vec_t params;
+  wasm_valtype_vec_t results;
   convertArgsTupleToValTypes<T>(&params);
   convertArgsTupleToValTypes<std::tuple<R>>(&results);
   return wasm_functype_new(&params, &results);
 }
 
 template <typename T> WasmFunctypePtr newWasmNewFuncType() {
-  wasm_valtype_vec_t params, results;
+  wasm_valtype_vec_t params;
+  wasm_valtype_vec_t results;
   convertArgsTupleToValTypes<T>(&params);
   convertArgsTupleToValTypes<std::tuple<>>(&results);
   return wasm_functype_new(&params, &results);
@@ -449,14 +477,15 @@ void Wamr::registerHostFunctionImpl(std::string_view module_name, std::string_vi
   WasmFunctypePtr type = newWasmNewFuncType<std::tuple<Args...>>();
   WasmFuncPtr func = wasm_func_new_with_env(
       store_.get(), type.get(),
-      [](void *data, const wasm_val_t params[], wasm_val_t results[]) -> wasm_trap_t * {
-        auto func_data = reinterpret_cast<HostFuncData *>(data);
+      [](void *data, const wasm_val_vec_t *params, wasm_val_vec_t * /*results*/) -> wasm_trap_t * {
+        auto *func_data = reinterpret_cast<HostFuncData *>(data);
         const bool log = func_data->vm_->cmpLogLevel(LogLevel::trace);
         if (log) {
           func_data->vm_->integration()->trace("[vm->host] " + func_data->name_ + "(" +
-                                               printValues(params, sizeof...(Args)) + ")");
+                                               printValues(params) + ")");
         }
-        auto args = convertValTypesToArgsTuple<std::tuple<Args...>>(params);
+        auto args = convertValTypesToArgsTuple<std::tuple<Args...>>(
+            params, std::make_index_sequence<sizeof...(Args)>{});
         auto fn = reinterpret_cast<void (*)(Args...)>(func_data->raw_func_);
         std::apply(fn, args);
         if (log) {
@@ -481,17 +510,18 @@ void Wamr::registerHostFunctionImpl(std::string_view module_name, std::string_vi
   WasmFunctypePtr type = newWasmNewFuncType<R, std::tuple<Args...>>();
   WasmFuncPtr func = wasm_func_new_with_env(
       store_.get(), type.get(),
-      [](void *data, const wasm_val_t params[], wasm_val_t results[]) -> wasm_trap_t * {
-        auto func_data = reinterpret_cast<HostFuncData *>(data);
+      [](void *data, const wasm_val_vec_t *params, wasm_val_vec_t *results) -> wasm_trap_t * {
+        auto *func_data = reinterpret_cast<HostFuncData *>(data);
         const bool log = func_data->vm_->cmpLogLevel(LogLevel::trace);
         if (log) {
           func_data->vm_->integration()->trace("[vm->host] " + func_data->name_ + "(" +
-                                               printValues(params, sizeof...(Args)) + ")");
+                                               printValues(params) + ")");
         }
-        auto args = convertValTypesToArgsTuple<std::tuple<Args...>>(params);
+        auto args = convertValTypesToArgsTuple<std::tuple<Args...>>(
+            params, std::make_index_sequence<sizeof...(Args)>{});
         auto fn = reinterpret_cast<R (*)(Args...)>(func_data->raw_func_);
         R res = std::apply(fn, args);
-        assignVal<R>(res, results[0]);
+        assignVal<R>(res, results->data[0]);
         if (log) {
           func_data->vm_->integration()->trace("[vm<-host] " + func_data->name_ +
                                                " return: " + std::to_string(res));
@@ -517,7 +547,8 @@ void Wamr::getModuleFunctionImpl(std::string_view function_name,
     return;
   }
 
-  WasmValtypeVec exp_args, exp_returns;
+  WasmValtypeVec exp_args;
+  WasmValtypeVec exp_returns;
   convertArgsTupleToValTypes<std::tuple<Args...>>(exp_args.get());
   convertArgsTupleToValTypes<std::tuple<>>(exp_returns.get());
   wasm_func_t *func = it->second.get();
@@ -534,20 +565,22 @@ void Wamr::getModuleFunctionImpl(std::string_view function_name,
   }
 
   *function = [func, function_name, this](ContextBase *context, Args... args) -> void {
-    wasm_val_t params[] = {makeVal(args)...};
+    wasm_val_t params_arr[] = {makeVal(args)...};
+    const wasm_val_vec_t params = WASM_ARRAY_VEC(params_arr);
+    wasm_val_vec_t results = WASM_EMPTY_VEC;
     const bool log = cmpLogLevel(LogLevel::trace);
     if (log) {
-      integration()->trace("[host->vm] " + std::string(function_name) + "(" +
-                           printValues(params, sizeof...(Args)) + ")");
+      integration()->trace("[host->vm] " + std::string(function_name) + "(" + printValues(&params) +
+                           ")");
     }
     SaveRestoreContext saved_context(context);
-    WasmTrapPtr trap{wasm_func_call(func, params, nullptr)};
+    WasmTrapPtr trap{wasm_func_call(func, &params, &results)};
     if (trap) {
       WasmByteVec error_message;
       wasm_trap_message(trap.get(), error_message.get());
+      std::string message(error_message.get()->data); // NULL-terminated
       fail(FailState::RuntimeError,
-           "Function: " + std::string(function_name) + " failed:\n" +
-               std::string(error_message.get()->data, error_message.get()->size));
+           "Function: " + std::string(function_name) + " failed: " + message);
       return;
     }
     if (log) {
@@ -564,7 +597,8 @@ void Wamr::getModuleFunctionImpl(std::string_view function_name,
     *function = nullptr;
     return;
   }
-  WasmValtypeVec exp_args, exp_returns;
+  WasmValtypeVec exp_args;
+  WasmValtypeVec exp_returns;
   convertArgsTupleToValTypes<std::tuple<Args...>>(exp_args.get());
   convertArgsTupleToValTypes<std::tuple<R>>(exp_returns.get());
   wasm_func_t *func = it->second.get();
@@ -580,24 +614,26 @@ void Wamr::getModuleFunctionImpl(std::string_view function_name,
   }
 
   *function = [func, function_name, this](ContextBase *context, Args... args) -> R {
-    wasm_val_t params[] = {makeVal(args)...};
-    wasm_val_t results[1];
+    wasm_val_t params_arr[] = {makeVal(args)...};
+    const wasm_val_vec_t params = WASM_ARRAY_VEC(params_arr);
+    wasm_val_t results_arr[1];
+    wasm_val_vec_t results = WASM_ARRAY_VEC(results_arr);
     const bool log = cmpLogLevel(LogLevel::trace);
     if (log) {
-      integration()->trace("[host->vm] " + std::string(function_name) + "(" +
-                           printValues(params, sizeof...(Args)) + ")");
+      integration()->trace("[host->vm] " + std::string(function_name) + "(" + printValues(&params) +
+                           ")");
     }
     SaveRestoreContext saved_context(context);
-    WasmTrapPtr trap{wasm_func_call(func, params, results)};
+    WasmTrapPtr trap{wasm_func_call(func, &params, &results)};
     if (trap) {
       WasmByteVec error_message;
       wasm_trap_message(trap.get(), error_message.get());
+      std::string message(error_message.get()->data); // NULL-terminated
       fail(FailState::RuntimeError,
-           "Function: " + std::string(function_name) + " failed:\n" +
-               std::string(error_message.get()->data, error_message.get()->size));
+           "Function: " + std::string(function_name) + " failed: " + message);
       return R{};
     }
-    R ret = convertValueTypeToArg<R>(results[0]);
+    R ret = convertValueTypeToArg<R>(results.data[0]);
     if (log) {
       integration()->trace("[host<-vm] " + std::string(function_name) +
                            " return: " + std::to_string(ret));

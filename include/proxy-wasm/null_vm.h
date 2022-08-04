@@ -32,11 +32,11 @@ struct NullVm : public WasmVm {
   NullVm(const NullVm &other) : plugin_name_(other.plugin_name_) {}
 
   // WasmVm
-  std::string_view runtime() override { return "null"; }
+  std::string_view getEngineName() override { return "null"; }
   Cloneable cloneable() override { return Cloneable::InstantiatedModule; };
   std::unique_ptr<WasmVm> clone() override;
-  bool load(std::string_view bytecode, std::string_view precompiled,
-            std::unordered_map<uint32_t, std::string> function_names) override;
+  bool load(std::string_view plugin_name, std::string_view precompiled,
+            const std::unordered_map<uint32_t, std::string> &function_names) override;
   bool link(std::string_view debug_name) override;
   uint64_t getMemorySize() override;
   std::optional<std::string_view> getMemory(uint64_t pointer, uint64_t size) override;
@@ -59,6 +59,8 @@ struct NullVm : public WasmVm {
                         typename ConvertFunctionTypeWordToUint32<_T>::type) override{};
   FOR_ALL_WASM_VM_IMPORTS(_REGISTER_CALLBACK)
 #undef _REGISTER_CALLBACK
+
+  void terminate() override {}
 
   std::string plugin_name_;
   std::unique_ptr<NullVmPlugin> plugin_;

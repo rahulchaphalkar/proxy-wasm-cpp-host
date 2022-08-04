@@ -18,88 +18,180 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "include/proxy-wasm/context.h"
 #include "include/proxy-wasm/wasm.h"
 
-#if defined(PROXY_WASM_HAS_RUNTIME_V8)
+#if defined(PROXY_WASM_HOST_ENGINE_V8)
 #include "include/proxy-wasm/v8.h"
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WAVM)
+#if defined(PROXY_WASM_HOST_ENGINE_WAVM)
 #include "include/proxy-wasm/wavm.h"
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WASMTIME)
+#if defined(PROXY_WASM_HOST_ENGINE_WASMTIME)
 #include "include/proxy-wasm/wasmtime.h"
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WAMR)
+#if defined(PROXY_WASM_HOST_ENGINE_WASMEDGE)
+#include "include/proxy-wasm/wasmedge.h"
+#endif
+#if defined(PROXY_WASM_HOST_ENGINE_WAMR)
 #include "include/proxy-wasm/wamr.h"
 #endif
 
 namespace proxy_wasm {
 
-std::vector<std::string> getRuntimes();
-std::string readTestWasmFile(std::string filename);
+std::vector<std::string> getWasmEngines();
+std::string readTestWasmFile(const std::string &filename);
 
-struct DummyIntegration : public WasmVmIntegration {
-  ~DummyIntegration() override{};
-  WasmVmIntegration *clone() override { return new DummyIntegration{}; }
+class TestIntegration : public WasmVmIntegration {
+public:
+  ~TestIntegration() override = default;
+  WasmVmIntegration *clone() override { return new TestIntegration{}; }
+
+  void setLogLevel(LogLevel level) { log_level_ = level; }
+
+  LogLevel getLogLevel() override { return log_level_; }
+
   void error(std::string_view message) override {
     std::cout << "ERROR from integration: " << message << std::endl;
-    error_message_ = message;
+    error_log_ += std::string(message) + "\n";
   }
+
+  bool isErrorLogEmpty() { return error_log_.empty(); }
+
+  bool isErrorLogged(std::string_view message) {
+    return error_log_.find(message) != std::string::npos;
+  }
+
   void trace(std::string_view message) override {
     std::cout << "TRACE from integration: " << message << std::endl;
-    trace_message_ = message;
+    trace_log_ += std::string(message) + "\n";
   }
-  bool getNullVmFunction(std::string_view function_name, bool returns_word, int number_of_arguments,
-                         NullPlugin *plugin, void *ptr_to_function_return) override {
+
+  bool isTraceLogEmpty() { return trace_log_.empty(); }
+
+  bool isTraceLogged(std::string_view message) {
+    return trace_log_.find(message) != std::string::npos;
+  }
+
+  bool getNullVmFunction(std::string_view /*function_name*/, bool /*returns_word*/,
+                         int /*number_of_arguments*/, NullPlugin * /*plugin*/,
+                         void * /*ptr_to_function_return*/) override {
     return false;
   };
 
-  LogLevel getLogLevel() override { return log_level_; }
-  std::string error_message_;
-  std::string trace_message_;
-  LogLevel log_level_ = LogLevel::info;
+private:
+  std::string error_log_;
+  std::string trace_log_;
+  LogLevel log_level_ = LogLevel::trace;
 };
 
-class TestVM : public testing::TestWithParam<std::string> {
+class TestContext : public ContextBase {
 public:
-  std::unique_ptr<proxy_wasm::WasmVm> vm_;
+  TestContext(WasmBase *wasm) : ContextBase(wasm) {}
+  TestContext(WasmBase *wasm, const std::shared_ptr<PluginBase> &plugin)
+      : ContextBase(wasm, plugin) {}
 
-  TestVM() {
-    runtime_ = GetParam();
+  WasmResult log(uint32_t /*log_level*/, std::string_view message) override {
+    auto new_log = std::string(message) + "\n";
+    log_ += new_log;
+    global_log_ += new_log;
+    return WasmResult::Ok;
+  }
+
+  WasmResult getProperty(std::string_view path, std::string *result) override {
+    if (path == "plugin_root_id") {
+      *result = root_id_;
+      return WasmResult::Ok;
+    }
+    return unimplemented();
+  }
+
+  bool isLogEmpty() { return log_.empty(); }
+
+  bool isLogged(std::string_view message) { return log_.find(message) != std::string::npos; }
+
+  static bool isGlobalLogged(std::string_view message) {
+    return global_log_.find(message) != std::string::npos;
+  }
+
+  static void resetGlobalLog() { global_log_ = ""; }
+
+  uint64_t getCurrentTimeNanoseconds() override {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+  }
+  uint64_t getMonotonicTimeNanoseconds() override {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+private:
+  std::string log_;
+  static std::string global_log_;
+};
+
+class TestWasm : public WasmBase {
+public:
+  TestWasm(std::unique_ptr<WasmVm> wasm_vm, std::unordered_map<std::string, std::string> envs = {},
+           std::string_view vm_id = "", std::string_view vm_configuration = "",
+           std::string_view vm_key = "")
+      : WasmBase(std::move(wasm_vm), vm_id, vm_configuration, vm_key, std::move(envs), {}) {}
+
+  TestWasm(const std::shared_ptr<WasmHandleBase> &base_wasm_handle, const WasmVmFactory &factory)
+      : WasmBase(base_wasm_handle, factory) {}
+
+  ContextBase *createVmContext() override { return new TestContext(this); };
+
+  ContextBase *createRootContext(const std::shared_ptr<PluginBase> &plugin) override {
+    return new TestContext(this, plugin);
+  }
+};
+
+class TestVm : public testing::TestWithParam<std::string> {
+public:
+  TestVm() {
+    engine_ = GetParam();
     vm_ = newVm();
   }
 
   std::unique_ptr<proxy_wasm::WasmVm> newVm() {
     std::unique_ptr<proxy_wasm::WasmVm> vm;
-    if (runtime_ == "") {
-      EXPECT_TRUE(false) << "runtime must not be empty";
-#if defined(PROXY_WASM_HAS_RUNTIME_V8)
-    } else if (runtime_ == "v8") {
+    if (engine_.empty()) {
+      ADD_FAILURE() << "engine must not be empty";
+#if defined(PROXY_WASM_HOST_ENGINE_V8)
+    } else if (engine_ == "v8") {
       vm = proxy_wasm::createV8Vm();
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WAVM)
-    } else if (runtime_ == "wavm") {
+#if defined(PROXY_WASM_HOST_ENGINE_WAVM)
+    } else if (engine_ == "wavm") {
       vm = proxy_wasm::createWavmVm();
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WASMTIME)
-    } else if (runtime_ == "wasmtime") {
+#if defined(PROXY_WASM_HOST_ENGINE_WASMTIME)
+    } else if (engine_ == "wasmtime") {
       vm = proxy_wasm::createWasmtimeVm();
 #endif
-#if defined(PROXY_WASM_HAS_RUNTIME_WAMR)
-    } else if (runtime_ == "wamr") {
+#if defined(PROXY_WASM_HOST_ENGINE_WASMEDGE)
+    } else if (engine_ == "wasmedge") {
+      vm = proxy_wasm::createWasmEdgeVm();
+#endif
+#if defined(PROXY_WASM_HOST_ENGINE_WAMR)
+    } else if (engine_ == "wamr") {
       vm = proxy_wasm::createWamrVm();
 #endif
     } else {
-      EXPECT_TRUE(false) << "compiled without support for the requested \"" << runtime_
-                         << "\" runtime";
+      ADD_FAILURE() << "compiled without support for the requested \"" << engine_ << "\" engine";
     }
-    vm->integration().reset(new DummyIntegration{});
+    vm->integration() = std::make_unique<TestIntegration>();
     return vm;
   };
 
-  std::string runtime_;
+  std::unique_ptr<proxy_wasm::WasmVm> vm_;
+  std::string engine_;
 };
+
 } // namespace proxy_wasm

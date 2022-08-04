@@ -17,8 +17,10 @@
 #include <array>
 #include <cstring>
 
-#include <openssl/curve25519.h>
+#ifdef PROXY_WASM_VERIFY_WITH_ED25519_PUBKEY
+#include <openssl/evp.h>
 #include <openssl/sha.h>
+#endif
 
 #include "include/proxy-wasm/bytecode_util.h"
 
@@ -26,20 +28,21 @@ namespace {
 
 #ifdef PROXY_WASM_VERIFY_WITH_ED25519_PUBKEY
 
-static uint8_t hex2dec(const unsigned char c) {
+uint8_t hex2dec(const unsigned char c) {
   if (c >= '0' && c <= '9') {
     return c - '0';
-  } else if (c >= 'a' && c <= 'f') {
-    return c - 'a' + 10;
-  } else if (c >= 'A' && c <= 'F') {
-    return c - 'A' + 10;
-  } else {
-    throw std::logic_error{"invalid hex character"};
   }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  if (c >= 'A' && c <= 'F') {
+    return c - 'A' + 10;
+  }
+  throw std::logic_error{"invalid hex character"};
 }
 
 template <size_t N> constexpr std::array<uint8_t, N> hex2pubkey(const char (&hex)[2 * N + 1]) {
-  std::array<uint8_t, N> pubkey;
+  std::array<uint8_t, N> pubkey{};
   for (size_t i = 0; i < pubkey.size(); i++) {
     pubkey[i] = hex2dec(hex[2 * i]) << 4 | hex2dec(hex[2 * i + 1]);
   }
@@ -83,6 +86,7 @@ bool SignatureUtil::verifySignature(std::string_view bytecode, std::string &mess
 
   uint32_t alg_id;
   std::memcpy(&alg_id, payload.data(), sizeof(uint32_t));
+  alg_id = wasmtoh(alg_id);
 
   if (alg_id != 2) {
     message = "Signature has a wrong alg_id (want: 2, is: " + std::to_string(alg_id) + ")";
@@ -103,7 +107,28 @@ bool SignatureUtil::verifySignature(std::string_view bytecode, std::string &mess
 
   static const auto ed25519_pubkey = hex2pubkey<32>(PROXY_WASM_VERIFY_WITH_ED25519_PUBKEY);
 
-  if (!ED25519_verify(hash, sizeof(hash), signature, ed25519_pubkey.data())) {
+  EVP_PKEY *pubkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, ed25519_pubkey.data(),
+                                                 32 /* ED25519_PUBLIC_KEY_LEN */);
+  if (pubkey == nullptr) {
+    message = "Failed to load the public key";
+    return false;
+  }
+
+  EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+  if (mdctx == nullptr) {
+    message = "Failed to allocate memory for EVP_MD_CTX";
+    EVP_PKEY_free(pubkey);
+    return false;
+  }
+
+  bool ok =
+      (EVP_DigestVerifyInit(mdctx, nullptr, nullptr, nullptr, pubkey) != 0) &&
+      (EVP_DigestVerify(mdctx, signature, 64 /* ED25519_SIGNATURE_LEN */, hash, sizeof(hash)) != 0);
+
+  EVP_MD_CTX_free(mdctx);
+  EVP_PKEY_free(pubkey);
+
+  if (!ok) {
     message = "Signature mismatch";
     return false;
   }

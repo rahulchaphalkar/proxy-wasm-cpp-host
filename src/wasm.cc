@@ -16,7 +16,7 @@
 #include "include/proxy-wasm/wasm.h"
 
 #include <cassert>
-#include <stdio.h>
+#include <cstdio>
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <openssl/sha.h>
 
@@ -33,9 +34,6 @@
 #include "include/proxy-wasm/vm_id_handle.h"
 
 namespace proxy_wasm {
-
-thread_local ContextBase *current_context_;
-thread_local uint32_t effective_context_id_ = 0;
 
 namespace {
 
@@ -46,7 +44,7 @@ thread_local std::unordered_map<std::string, std::weak_ptr<PluginHandleBase>> lo
 std::mutex base_wasms_mutex;
 std::unordered_map<std::string, std::weak_ptr<WasmHandleBase>> *base_wasms = nullptr;
 
-std::vector<uint8_t> Sha256(const std::vector<std::string_view> parts) {
+std::vector<uint8_t> Sha256(const std::vector<std::string_view> &parts) {
   uint8_t sha256[SHA256_DIGEST_LENGTH];
   SHA256_CTX sha_ctx;
   SHA256_Init(&sha_ctx);
@@ -57,7 +55,7 @@ std::vector<uint8_t> Sha256(const std::vector<std::string_view> parts) {
   return std::vector<uint8_t>(std::begin(sha256), std::end(sha256));
 }
 
-std::string BytesToHex(std::vector<uint8_t> bytes) {
+std::string BytesToHex(const std::vector<uint8_t> &bytes) {
   static const char *const hex = "0123456789ABCDEF";
   std::string result;
   result.reserve(bytes.size() * 2);
@@ -78,7 +76,7 @@ std::string makeVmKey(std::string_view vm_id, std::string_view vm_configuration,
 class WasmBase::ShutdownHandle {
 public:
   ~ShutdownHandle() { wasm_->finishShutdown(); }
-  ShutdownHandle(std::shared_ptr<WasmBase> wasm) : wasm_(wasm) {}
+  ShutdownHandle(std::shared_ptr<WasmBase> wasm) : wasm_(std::move(wasm)) {}
 
 private:
   std::shared_ptr<WasmBase> wasm_;
@@ -91,6 +89,7 @@ void WasmBase::registerCallbacks() {
       &ConvertFunctionWordToUint32<decltype(exports::_fn),                                         \
                                    exports::_fn>::convertFunctionWordToUint32)
   _REGISTER(pthread_equal);
+  _REGISTER(emscripten_notify_memory_growth);
 #undef _REGISTER
 
   // Register the capability with the VM if it has been allowed, otherwise register a stub.
@@ -185,7 +184,8 @@ void WasmBase::getFunctions() {
 #undef _GET_PROXY
 }
 
-WasmBase::WasmBase(const std::shared_ptr<WasmHandleBase> &base_wasm_handle, WasmVmFactory factory)
+WasmBase::WasmBase(const std::shared_ptr<WasmHandleBase> &base_wasm_handle,
+                   const WasmVmFactory &factory)
     : std::enable_shared_from_this<WasmBase>(*base_wasm_handle->wasm()),
       vm_id_(base_wasm_handle->wasm()->vm_id_), vm_key_(base_wasm_handle->wasm()->vm_key_),
       started_from_(base_wasm_handle->wasm()->wasm_vm()->cloneable()),
@@ -209,7 +209,7 @@ WasmBase::WasmBase(std::unique_ptr<WasmVm> wasm_vm, std::string_view vm_id,
                    std::unordered_map<std::string, std::string> envs,
                    AllowedCapabilitiesMap allowed_capabilities)
     : vm_id_(std::string(vm_id)), vm_key_(std::string(vm_key)), wasm_vm_(std::move(wasm_vm)),
-      envs_(envs), allowed_capabilities_(std::move(allowed_capabilities)),
+      envs_(std::move(envs)), allowed_capabilities_(std::move(allowed_capabilities)),
       vm_configuration_(std::string(vm_configuration)), vm_id_handle_(getVmIdHandle(vm_id)) {
   if (!wasm_vm_) {
     failed_ = FailState::UnableToCreateVm;
@@ -231,7 +231,7 @@ bool WasmBase::load(const std::string &code, bool allow_precompiled) {
     return false;
   }
 
-  if (wasm_vm_->runtime() == "null") {
+  if (wasm_vm_->getEngineName() == "null") {
     auto ok = wasm_vm_->load(code, {}, {});
     if (!ok) {
       fail(FailState::UnableToInitializeCode, "Failed to load NullVM plugin");
@@ -246,7 +246,8 @@ bool WasmBase::load(const std::string &code, bool allow_precompiled) {
   if (!SignatureUtil::verifySignature(code, message)) {
     fail(FailState::UnableToInitializeCode, message);
     return false;
-  } else {
+  }
+  if (!message.empty()) {
     wasm_vm_->integration()->trace(message);
   }
 
@@ -292,7 +293,7 @@ bool WasmBase::load(const std::string &code, bool allow_precompiled) {
     return false;
   }
 
-  // Store for future use in non-cloneable runtimes.
+  // Store for future use in non-cloneable Wasm engines.
   if (wasm_vm_->cloneable() == Cloneable::NotCloneable) {
     module_bytecode_ = stripped;
     module_precompiled_ = precompiled;
@@ -372,17 +373,17 @@ void WasmBase::startVm(ContextBase *root_context) {
 }
 
 bool WasmBase::configure(ContextBase *root_context, std::shared_ptr<PluginBase> plugin) {
-  return root_context->onConfigure(plugin);
+  return root_context->onConfigure(std::move(plugin));
 }
 
-ContextBase *WasmBase::start(std::shared_ptr<PluginBase> plugin) {
+ContextBase *WasmBase::start(const std::shared_ptr<PluginBase> &plugin) {
   auto it = root_contexts_.find(plugin->key());
   if (it != root_contexts_.end()) {
     it->second->onStart(plugin);
     return it->second.get();
   }
   auto context = std::unique_ptr<ContextBase>(createRootContext(plugin));
-  auto context_ptr = context.get();
+  auto *context_ptr = context.get();
   root_contexts_[plugin->key()] = std::move(context);
   if (!context_ptr->onStart(plugin)) {
     return nullptr;
@@ -446,15 +447,44 @@ void WasmBase::finishShutdown() {
   }
 }
 
-std::shared_ptr<WasmHandleBase> createWasm(std::string vm_key, std::string code,
-                                           std::shared_ptr<PluginBase> plugin,
-                                           WasmHandleFactory factory,
-                                           WasmHandleCloneFactory clone_factory,
+bool WasmHandleBase::canary(const std::shared_ptr<PluginBase> &plugin,
+                            const WasmHandleCloneFactory &clone_factory) {
+  if (this->wasm() == nullptr) {
+    return false;
+  }
+  auto configuration_canary_handle = clone_factory(shared_from_this());
+  if (!configuration_canary_handle) {
+    this->wasm()->fail(FailState::UnableToCloneVm, "Failed to clone Base Wasm");
+    return false;
+  }
+  if (!configuration_canary_handle->wasm()->initialize()) {
+    configuration_canary_handle->wasm()->fail(FailState::UnableToInitializeCode,
+                                              "Failed to initialize Wasm code");
+    return false;
+  }
+  auto *root_context = configuration_canary_handle->wasm()->start(plugin);
+  if (root_context == nullptr) {
+    configuration_canary_handle->wasm()->fail(FailState::StartFailed, "Failed to start base Wasm");
+    return false;
+  }
+  if (!configuration_canary_handle->wasm()->configure(root_context, plugin)) {
+    configuration_canary_handle->wasm()->fail(FailState::ConfigureFailed,
+                                              "Failed to configure base Wasm plugin");
+    return false;
+  }
+  configuration_canary_handle->kill();
+  return true;
+}
+
+std::shared_ptr<WasmHandleBase> createWasm(const std::string &vm_key, const std::string &code,
+                                           const std::shared_ptr<PluginBase> &plugin,
+                                           const WasmHandleFactory &factory,
+                                           const WasmHandleCloneFactory &clone_factory,
                                            bool allow_precompiled) {
   std::shared_ptr<WasmHandleBase> wasm_handle;
   {
     std::lock_guard<std::mutex> guard(base_wasms_mutex);
-    if (!base_wasms) {
+    if (base_wasms == nullptr) {
       base_wasms = new std::remove_reference<decltype(*base_wasms)>::type;
     }
     auto it = base_wasms->find(vm_key);
@@ -464,44 +494,29 @@ std::shared_ptr<WasmHandleBase> createWasm(std::string vm_key, std::string code,
         base_wasms->erase(it);
       }
     }
-    if (wasm_handle) {
-      return wasm_handle;
-    }
-    wasm_handle = factory(vm_key);
     if (!wasm_handle) {
-      return nullptr;
+      // If no cached base_wasm, creates a new base_wasm, loads the code and initializes it.
+      wasm_handle = factory(vm_key);
+      if (!wasm_handle) {
+        return nullptr;
+      }
+      if (!wasm_handle->wasm()->load(code, allow_precompiled)) {
+        wasm_handle->wasm()->fail(FailState::UnableToInitializeCode, "Failed to load Wasm code");
+        return nullptr;
+      }
+      if (!wasm_handle->wasm()->initialize()) {
+        wasm_handle->wasm()->fail(FailState::UnableToInitializeCode,
+                                  "Failed to initialize Wasm code");
+        return nullptr;
+      }
+      (*base_wasms)[vm_key] = wasm_handle;
     }
-    (*base_wasms)[vm_key] = wasm_handle;
   }
 
-  if (!wasm_handle->wasm()->load(code, allow_precompiled)) {
-    wasm_handle->wasm()->fail(FailState::UnableToInitializeCode, "Failed to load Wasm code");
+  // Either creating new one or reusing the existing one, apply canary for each plugin.
+  if (!wasm_handle->canary(plugin, clone_factory)) {
     return nullptr;
   }
-  if (!wasm_handle->wasm()->initialize()) {
-    wasm_handle->wasm()->fail(FailState::UnableToInitializeCode, "Failed to initialize Wasm code");
-    return nullptr;
-  }
-  auto configuration_canary_handle = clone_factory(wasm_handle);
-  if (!configuration_canary_handle) {
-    wasm_handle->wasm()->fail(FailState::UnableToCloneVm, "Failed to clone Base Wasm");
-    return nullptr;
-  }
-  if (!configuration_canary_handle->wasm()->initialize()) {
-    wasm_handle->wasm()->fail(FailState::UnableToInitializeCode, "Failed to initialize Wasm code");
-    return nullptr;
-  }
-  auto root_context = configuration_canary_handle->wasm()->start(plugin);
-  if (!root_context) {
-    configuration_canary_handle->wasm()->fail(FailState::StartFailed, "Failed to start base Wasm");
-    return nullptr;
-  }
-  if (!configuration_canary_handle->wasm()->configure(root_context, plugin)) {
-    configuration_canary_handle->wasm()->fail(FailState::ConfigureFailed,
-                                              "Failed to configure base Wasm plugin");
-    return nullptr;
-  }
-  configuration_canary_handle->kill();
   return wasm_handle;
 };
 
@@ -518,8 +533,8 @@ std::shared_ptr<WasmHandleBase> getThreadLocalWasm(std::string_view vm_key) {
 }
 
 static std::shared_ptr<WasmHandleBase>
-getOrCreateThreadLocalWasm(std::shared_ptr<WasmHandleBase> base_handle,
-                           WasmHandleCloneFactory clone_factory) {
+getOrCreateThreadLocalWasm(const std::shared_ptr<WasmHandleBase> &base_handle,
+                           const WasmHandleCloneFactory &clone_factory) {
   std::string vm_key(base_handle->wasm()->vm_key());
   // Get existing thread-local WasmVM.
   auto it = local_wasms.find(vm_key);
@@ -555,8 +570,8 @@ getOrCreateThreadLocalWasm(std::shared_ptr<WasmHandleBase> base_handle,
 }
 
 std::shared_ptr<PluginHandleBase> getOrCreateThreadLocalPlugin(
-    std::shared_ptr<WasmHandleBase> base_handle, std::shared_ptr<PluginBase> plugin,
-    WasmHandleCloneFactory clone_factory, PluginHandleFactory plugin_factory) {
+    const std::shared_ptr<WasmHandleBase> &base_handle, const std::shared_ptr<PluginBase> &plugin,
+    const WasmHandleCloneFactory &clone_factory, const PluginHandleFactory &plugin_factory) {
   std::string key(std::string(base_handle->wasm()->vm_key()) + "||" + plugin->key());
   // Get existing thread-local Plugin handle.
   auto it = local_plugins.find(key);
@@ -574,8 +589,8 @@ std::shared_ptr<PluginHandleBase> getOrCreateThreadLocalPlugin(
     return nullptr;
   }
   // Create and initialize new thread-local Plugin.
-  auto plugin_context = wasm_handle->wasm()->start(plugin);
-  if (!plugin_context) {
+  auto *plugin_context = wasm_handle->wasm()->start(plugin);
+  if (plugin_context == nullptr) {
     base_handle->wasm()->fail(FailState::StartFailed, "Failed to start thread-local Wasm");
     return nullptr;
   }
@@ -601,7 +616,7 @@ void clearWasmCachesForTesting() {
   local_plugins.clear();
   local_wasms.clear();
   std::lock_guard<std::mutex> guard(base_wasms_mutex);
-  if (base_wasms) {
+  if (base_wasms != nullptr) {
     delete base_wasms;
     base_wasms = nullptr;
   }

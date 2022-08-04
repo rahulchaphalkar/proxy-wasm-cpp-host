@@ -206,7 +206,7 @@ public:
   virtual FilterHeadersStatus onRequestHeaders(uint32_t headers, bool end_of_stream) = 0;
 
   // Call on a stream context to indicate that body data has arrived.
-  virtual FilterDataStatus onRequestBody(uint32_t body_buffer_length, bool end_of_stream) = 0;
+  virtual FilterDataStatus onRequestBody(uint32_t body_length, bool end_of_stream) = 0;
 
   // Call on a stream context to indicate that the request trailers have arrived.
   virtual FilterTrailersStatus onRequestTrailers(uint32_t trailers) = 0;
@@ -218,7 +218,7 @@ public:
   virtual FilterHeadersStatus onResponseHeaders(uint32_t trailers, bool end_of_stream) = 0;
 
   // Call on a stream context to indicate that body data has arrived.
-  virtual FilterDataStatus onResponseBody(uint32_t body_buffer_length, bool end_of_stream) = 0;
+  virtual FilterDataStatus onResponseBody(uint32_t body_length, bool end_of_stream) = 0;
 
   // Call on a stream context to indicate that the request trailers have arrived.
   virtual FilterTrailersStatus onResponseTrailers(uint32_t trailers) = 0;
@@ -596,7 +596,7 @@ struct GeneralInterface {
 };
 
 /**
- * SharedDataInterface is for shaing data between VMs. In general the VMs may be on different
+ * SharedDataInterface is for sharing data between VMs. In general the VMs may be on different
  * threads.  Keys can have any format, but good practice would use reverse DNS and namespacing
  * prefixes to avoid conflicts.
  */
@@ -621,6 +621,23 @@ struct SharedDataInterface {
    * @param data is a location to store the returned value.
    */
   virtual WasmResult setSharedData(std::string_view key, std::string_view value, uint32_t cas) = 0;
+
+  /**
+   * Return all the keys from the data shraed between VMs
+   * @param data is a location to store the returned value.
+   */
+  virtual WasmResult getSharedDataKeys(std::vector<std::string> *result) = 0;
+
+  /**
+   * Removes the given key from the data shared between VMs.
+   * @param key is a proxy-wide key mapping to the shared data value.
+   * @param cas is a compare-and-swap value. If it is zero it is ignored, otherwise it must match
+   * @param cas is a location to store value, and cas number, associated with the removed key
+   * the cas associated with the value.
+   */
+  virtual WasmResult
+  removeSharedDataKey(std::string_view key, uint32_t cas,
+                      std::pair<std::string /* value */, uint32_t /* cas */> *result) = 0;
 }; // namespace proxy_wasm
 
 struct SharedQueueInterface {
