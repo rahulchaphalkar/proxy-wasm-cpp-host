@@ -32,7 +32,7 @@
 #include "include/v8.h"
 #include "src/wasm/c-api.h"
 #include "wasm-api/wasm.hh"
-
+#include "src/third_party/vtune/v8-vtune.h"
 namespace v8::internal {
 extern bool FLAG_liftoff;
 extern unsigned int FLAG_wasm_max_mem_pages;
@@ -267,7 +267,7 @@ bool V8::load(std::string_view bytecode, std::string_view precompiled,
   if (store_ == nullptr) {
     return false;
   }
-
+  Isolate::CreateParams create_params;
   if (!precompiled.empty()) {
     auto vec = wasm::vec<byte_t>::make_uninitialized(precompiled.size());
     ::memcpy(vec.get(), precompiled.data(), precompiled.size());
@@ -291,7 +291,7 @@ bool V8::load(std::string_view bytecode, std::string_view precompiled,
   }
 
   function_names_index_ = function_names;
-
+  create_params.code_event_handler = vTune::GetVtuneCodeEventHandler();
   return true;
 }
 
