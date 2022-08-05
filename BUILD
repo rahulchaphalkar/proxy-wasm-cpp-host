@@ -107,7 +107,8 @@ cc_library(
     srcs = [
         "src/v8/v8.cc",
     ],
-    hdrs = ["include/proxy-wasm/v8.h"],
+    hdrs = ["include/proxy-wasm/v8.h",
+            "src/third_party/vtune/v8-vtune.h"],
     defines = [
         "PROXY_WASM_HAS_RUNTIME_V8",
         "PROXY_WASM_HOST_ENGINE_V8",
