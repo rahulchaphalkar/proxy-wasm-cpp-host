@@ -44,7 +44,9 @@ struct HostFuncData {
 using HostFuncDataPtr = std::unique_ptr<HostFuncData>;
 
 wasm_engine_t *engine() {
-  static const auto engine = WasmEnginePtr(wasm_engine_new());
+  wasm_config_t *config = wasm_config_new();
+  wasmtime_config_profiler_set(config, WASMTIME_PROFILING_STRATEGY_JITDUMP);
+  static const auto engine = WasmEnginePtr(wasm_engine_new_with_config(config));
   return engine.get();
 }
 
